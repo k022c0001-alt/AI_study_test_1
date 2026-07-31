@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>国立仏像彫刻美術館 - Buddhist Statue Museum</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style id="custom-theme-styles">
+    /* 重厚感のある明朝体 */
+    body { font-family: 'Sawarabi Mincho', 'Shippori Mincho', serif; }
+    
+    /* 金箔のようなグラデーションテキスト */
+    .text-gold {
+      background: linear-gradient(to right, #bf953f, #fcf6ba, #b38728, #fbf5b7, #aa771c);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    /* AIからのレイアウト変更用 */
+    .layout-7-3 {
+      display: grid !important;
+      grid-template-columns: 7fr 3fr !important;
+      gap: 1.5rem;
+    }
+
+    /* 選択エフェクト（Inspector用 - 和風なので朱色） */
+    .inspect-hover {
+      outline: 2px solid #c53030 !important;
+      outline-offset: 2px;
+      cursor: crosshair;
+    }
+  </style>
+</head>
+<body class="bg-[#121110] text-[#dcd1c4] min-h-screen p-4 md:p-8">
+
+  <header id="header" class="max-w-5xl mx-auto mb-12 border-b border-[#3a352d] pb-8 text-center">
+    <p class="text-[#8c7e6a] text-sm tracking-[0.3em] mb-4">NATIONAL BUDDHIST STATUE GALLERY</p>
+    <h1 class="text-4xl md:text-5xl text-gold tracking-widest font-bold">国立仏像彫刻美術館</h1>
+  </header>
+
+  <div id="main-container" class="max-w-5xl mx-auto flex flex-col gap-8">
+    
+    <div id="section-main" class="bg-[#1c1a18] p-8 md:p-12 shadow-2xl border border-[#2a2622]">
+      <h2 class="text-2xl text-[#f0e6d2] mb-6 flex items-center gap-4">
+        <span class="w-8 h-[1px] bg-[#bf953f]"></span>
+        祈りの造形、千年の美
+      </h2>
+      <p class="text-[#a89d8d] leading-loose mb-8">
+        飛鳥時代の素朴な微笑みから、鎌倉時代の力強い躍動感まで。
+        日本の木彫仏・金銅仏が織りなす「祈り」の歴史を、照明を落とした静寂の空間でご堪能いただけます。
+        国宝・重要文化財を含む約120点を常設展示しております。
+      </p>
+      
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 border-t border-[#2a2622] pt-8">
+        <div class="text-center">
+          <div class="w-16 h-16 mx-auto bg-[#2a2622] rounded-full flex items-center justify-center mb-4 border border-[#3a352d]">
+            <span class="text-2xl">✨</span>
+          </div>
+          <h3 class="text-[#dcd1c4] mb-2">飛鳥・白鳳</h3>
+          <p class="text-xs text-[#8c7e6a]">おおらかなアルカイックスマイル</p>
+        </div>
+        <div class="text-center">
+          <div class="w-16 h-16 mx-auto bg-[#2a2622] rounded-full flex items-center justify-center mb-4 border border-[#3a352d]">
+            <span class="text-2xl">🌿</span>
+          </div>
+          <h3 class="text-[#dcd1c4] mb-2">天平・平安</h3>
+          <p class="text-xs text-[#8c7e6a]">密教美術と極彩色の世界</p>
+        </div>
+        <div class="text-center">
+          <div class="w-16 h-16 mx-auto bg-[#2a2622] rounded-full flex items-center justify-center mb-4 border border-[#3a352d]">
+            <span class="text-2xl">⚔️</span>
+          </div>
+          <h3 class="text-[#dcd1c4] mb-2">鎌倉</h3>
+          <p class="text-xs text-[#8c7e6a]">運慶・快慶による写実表現</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="section-sub" class="bg-[#141311] border border-[#bf953f]/30 p-8">
+      <h2 class="text-xl text-gold tracking-widest mb-6">拝観案内</h2>
+      <div class="space-y-4 text-[#a89d8d] text-sm font-mono">
+        <p class="border-b border-[#2a2622] pb-2">■ 開門: 午前九時 〜 午後五時</p>
+        <p class="border-b border-[#2a2622] pb-2">■ 休館: 月曜日（祝日の場合は翌日）</p>
+        <p class="border-b border-[#2a2622] pb-2">■ 拝観料: 一般 1,500円</p>
+      </div>
+      <button class="w-full mt-8 border border-[#bf953f] text-[#bf953f] hover:bg-[#bf953f] hover:text-black py-3 transition-colors tracking-widest duration-300">
+        音声ガイドを予約する
+      </button>
+    </div>
+
+  </div>
+
+  <script>
+    const body = document.body;
+    const container = document.getElementById('main-container');
+
+    window.addEventListener('message', (event) => {
+      const { action, payload } = event.data;
+      if (!action) return;
+      
+      switch (action) {
+        case 'APPLY_LAYOUT_73':
+          container.classList.toggle('layout-7-3');
+          break;
+        case 'INJECT_CUSTOM_CSS':
+          if (payload && payload.css) {
+            document.getElementById('custom-theme-styles').innerHTML += payload.css;
+          }
+          break;
+      }
+    });
+
+    document.body.addEventListener('mouseover', (e) => {
+      if (e.target !== body && e.target !== container) e.target.classList.add('inspect-hover');
+    });
+    document.body.addEventListener('mouseout', (e) => {
+      if (e.target !== body && e.target !== container) e.target.classList.remove('inspect-hover');
+    });
+    document.body.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      window.parent.postMessage({
+        type: 'ELEMENT_CLICKED',
+        payload: { tagName: e.target.tagName, id: e.target.id, className: e.target.className, text: e.target.innerText?.substring(0, 30) }
+      }, '*');
+    });
+  </script>
+</body>
+</html>
