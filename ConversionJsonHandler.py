@@ -50,18 +50,41 @@ class ConversionJsonHandler:
         
         success = self.knowledge_manager.write_file(new_file_path, formatted_json_str)
 
-        if success:
-            return {
-                "status": "success",
-                "message": f"翻訳が完了し、{new_file_path} に保存しました！",
-                "new_file_path": new_file_path,
-                "content": parsed_json
+        # backend/api/services/handlers/ConversionJsonHandler.py の成功時の return を変更
+
+if success:
+    return {
+        # AiChatMessageList.jsx で UIブロック として認識させるための魔法の言葉
+        "response_type": "ui_code",
+        "message": f"ファイルの翻訳が完了し、`{new_file_path}` に保存しました。",
+        
+        # blocks.jsx に渡すブロックの配列
+        "blocks": [
+            {
+                # blocks.jsx で登録した名前と完全一致させる
+                "type": "conversion_jsonBlock", 
+                "props": {
+                    "status": "success",
+                    "new_file_path": new_file_path,
+                    "json_content": parsed_json  # 翻訳済みの辞書データ
+                }
             }
-        else:
-            return {
-                "status": "error",
-                "message": "ファイルの保存に失敗しました。"
+        ]
+    }
+else:
+    return {
+        "response_type": "ui_code",
+        "message": "エラーが発生しました。",
+        "blocks": [
+            {
+                "type": "conversion_jsonBlock",
+                "props": {
+                    "status": "error",
+                    "message": "ファイルの保存に失敗しました。"
+                }
             }
+        ]
+    }
 
     def _build_prompt(self, json_str: str) -> str:
         return f"""
