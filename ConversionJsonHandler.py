@@ -1,6 +1,8 @@
 # backend/api/services/handlers/ConversionJsonHandler.py
 import json
 import os
+import zipfile
+import uuid
 from typing import Dict, Any
 
 class ConversionJsonHandler:
@@ -11,6 +13,9 @@ class ConversionJsonHandler:
         """
         self.llm_service = llm_service
         self.knowledge_manager = knowledge_manager
+        
+        # 1度にLLMに投げるキーの数（トークン数上限に合わせて調整してください）
+        self.chunk_size = 50 
 
     def handle(self, user_message: str, parsed_intent: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -18,73 +23,128 @@ class ConversionJsonHandler:
         """
         print("🌍 [ConversionJsonHandler] JSONの英語翻訳を開始します...")
 
-        # 1. ターゲットとなるJSONを特定（インテント解析結果から取得など）
-        # ※ 実際の実装に合わせて取得元を変更してください
         targets = parsed_intent.get("targets", [])
         if not targets:
             return {"status": "error", "message": "翻訳するJSONファイルが指定されていません。"}
         
-        target_file_path = targets[0] # 例: "data/locales/ja.json"
+        results = []
+        translated_files = [] # ZIPに含めるための成功したファイルパスリスト
 
-        # 2. （仮）対象ファイルの読み込み
-        # 実際には LazyKnowledge やファイルを読んで中身を取得します
-        # original_content_str = self._read_file(target_file_path)
-        original_content_str = '{"greeting": "こんにちは", "farewell": "さようなら"}' # 仮データ
+        # 1. 複数ファイルをループ処理
+        for target_file_path in targets:
+            try:
+                # ファイルの読み込み（※knowledge_managerの実装に合わせてメソッド名は変更してください）
+                original_content_str = self.knowledge_manager.read_file(target_file_path)
+                
+                if not original_content_str:
+                    raise ValueError("ファイルが空、または読み込めませんでした。")
+                
+                parsed_original = json.loads(original_content_str)
+                
+                # 2. 巨大なJSONを分割して翻訳
+                translated_dict = self._translate_in_chunks(parsed_original)
+                
+                # 3. 整形と保存
+                formatted_json_str = json.dumps(translated_dict, ensure_ascii=False, indent=2)
+                new_file_path = self._generate_en_path(target_file_path)
+                
+                success = self.knowledge_manager.write_file(new_file_path, formatted_json_str)
 
-        # 3. LLMへ翻訳依頼
-        prompt = self._build_prompt(original_content_str)
-        translated_text = self.llm_service.generate_text(prompt)
+                if success:
+                    results.append({
+                        "status": "success",
+                        "original_path": target_file_path,
+                        "new_file_path": new_file_path
+                    })
+                    translated_files.append(new_file_path)
+                else:
+                    results.append({
+                        "status": "error",
+                        "original_path": target_file_path,
+                        "message": "ファイルの保存に失敗しました。"
+                    })
 
-        # 4. JSONとして正しいか検証＆整形
-        try:
-            # LLMが余計なMarkdown(```json)をつけてきた場合の除去など
-            clean_text = translated_text.replace("```json", "").replace("```", "").strip()
-            parsed_json = json.loads(clean_text)
-            formatted_json_str = json.dumps(parsed_json, ensure_ascii=False, indent=2)
-        except json.JSONDecodeError:
-            print("⚠️ [ConversionJsonHandler] LLMの出力が正しいJSONではありません。")
-            return {"status": "error", "message": "翻訳結果のJSONフォーマットが不正です。"}
-
-        # 5. KnowledgeManagerを使って保存
-        new_file_path = self._generate_en_path(target_file_path)
-        
-        success = self.knowledge_manager.write_file(new_file_path, formatted_json_str)
-
-        # backend/api/services/handlers/ConversionJsonHandler.py の成功時の return を変更
-
-if success:
-    return {
-        # AiChatMessageList.jsx で UIブロック として認識させるための魔法の言葉
-        "response_type": "ui_code",
-        "message": f"ファイルの翻訳が完了し、`{new_file_path}` に保存しました。",
-        
-        # blocks.jsx に渡すブロックの配列
-        "blocks": [
-            {
-                # blocks.jsx で登録した名前と完全一致させる
-                "type": "conversion_jsonBlock", 
-                "props": {
-                    "status": "success",
-                    "new_file_path": new_file_path,
-                    "json_content": parsed_json  # 翻訳済みの辞書データ
-                }
-            }
-        ]
-    }
-else:
-    return {
-        "response_type": "ui_code",
-        "message": "エラーが発生しました。",
-        "blocks": [
-            {
-                "type": "conversion_jsonBlock",
-                "props": {
+            except Exception as e:
+                print(f"⚠️ [ConversionJsonHandler] エラーが発生しました ({target_file_path}): {str(e)}")
+                results.append({
                     "status": "error",
-                    "message": "ファイルの保存に失敗しました。"
+                    "original_path": target_file_path,
+                    "message": f"処理エラー: {str(e)}"
+                })
+
+        # 4. 成功したファイルがあればZIPにまとめる (ClaudeのArtifactsライクな挙動)
+        zip_download_url = None
+        if len(translated_files) > 0:
+            try:
+                # ZIPファイルの保存先ディレクトリ（環境に合わせて調整してください）
+                export_dir = os.path.join("data", "exports")
+                os.makedirs(export_dir, exist_ok=True)
+                
+                # 同時実行時のかぶりを防ぐためUUIDを付与
+                zip_filename = f"translated_jsons_{uuid.uuid4().hex[:8]}.zip"
+                zip_filepath = os.path.join(export_dir, zip_filename)
+                
+                with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in translated_files:
+                        # 実際のOS上の絶対パスを取得（※実装に合わせて変更してください）
+                        # 例: actual_path = self.knowledge_manager.get_absolute_path(file_path)
+                        actual_path = getattr(self.knowledge_manager, "get_absolute_path", lambda p: p)(file_path)
+                        
+                        # ZIP内でのファイル名を指定（ディレクトリ構造を維持しない場合はbasenameのみ）
+                        arcname = os.path.basename(file_path)
+                        
+                        if os.path.exists(actual_path):
+                            zipf.write(actual_path, arcname=arcname)
+                
+                # フロントエンドからのダウンロード用APIルートを指定（環境に合わせて調整）
+                zip_download_url = f"/api/files/download?path={zip_filepath}"
+
+            except Exception as e:
+                print(f"⚠️ [ConversionJsonHandler] ZIPファイルの作成に失敗しました: {str(e)}")
+
+        # 5. フロントエンドへ返すデータの構築
+        return {
+            "response_type": "ui_code",
+            "message": f"{len(targets)}件中 {len(translated_files)}件 の翻訳処理が完了しました。",
+            "blocks": [
+                {
+                    "type": "conversion_jsonBlock", 
+                    "props": {
+                        "results": results,
+                        "zip_download_url": zip_download_url # フロントエンドでダウンロードボタン化する
+                    }
                 }
-            }
-        ]
-    }
+            ]
+        }
+
+    def _translate_in_chunks(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        JSON（辞書）をチャンクごとに分割してLLMに翻訳させ、後で1つに結合する
+        （※ネストが浅いフラットなキーバリューのJSONファイルに最適化されています）
+        """
+        keys = list(data.keys())
+        translated_result = {}
+
+        for i in range(0, len(keys), self.chunk_size):
+            chunk_keys = keys[i:i + self.chunk_size]
+            chunk_data = {k: data[k] for k in chunk_keys}
+            
+            prompt = self._build_prompt(json.dumps(chunk_data, ensure_ascii=False))
+            translated_text = self.llm_service.generate_text(prompt)
+            
+            try:
+                # LLMが余計なMarkdownやテキストをつけてきた場合の除去
+                clean_text = translated_text.replace("```json", "").replace("```", "").strip()
+                parsed_chunk = json.loads(clean_text)
+                
+                # 翻訳結果を統合
+                translated_result.update(parsed_chunk)
+            except json.JSONDecodeError:
+                print("⚠️ [ConversionJsonHandler] LLMが不正なJSONを返しました。一部チャンクの原文を維持します。")
+                # エラー時は元の日本語をそのまま保持するフェイルセーフ
+                translated_result.update(chunk_data) 
+
+        return translated_result
 
     def _build_prompt(self, json_str: str) -> str:
         return f"""
