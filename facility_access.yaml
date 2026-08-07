@@ -1,0 +1,33 @@
+name: facility_access
+label: 生活利便施設・距離評価テーマ
+group: facility
+denominator: population_10k
+weight: 1.0
+
+# OpenDataカタログで検索するキーワード一覧
+queries:
+  - "駅"
+  - "避難所"
+  - "医療機関"
+  - "病院"
+  - "商店街"
+  - "スーパー"
+  - "公園"
+  - "理容"
+  - "投票所"
+
+formats:
+  - "CSV"
+  - "GeoJSON"
+
+rows: 200
+max_packages: 1000
+
+# score_engine.py と連携するためのカテゴリ別重み設定
+category_weights:
+  station: 0.20
+  company: 0.20
+  shopping: 0.15
+  hospital: 0.15
+  restaurant: 0.15
+  park: 0.15
