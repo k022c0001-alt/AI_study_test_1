@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Git_manual.py (Safety First Version)
+=========================================================
+対象リポジトリを毎回指定することで、
+誤ったリポジトリへのPush事故を物理的に防ぐマニュアル
+=========================================================
+"""
+
+import sys
+
+def get_manuals(repo_url):
+    """
+    入力されたリポジトリURLを各コマンドに動的に埋め込みます。
+    originに依存せず直接URLを指定することでPush事故を防ぎます。
+    """
+    return {
+        "1": {
+            "title": "現在の状態を確認する",
+            "text": """
+git status
+git remote -v
+git branch
+"""
+        },
+        "2": {
+            "title": "よく使う基本コマンド (安全なPush)",
+            "text": f"""
+git add .
+git commit -m "Update"
+
+# 【安全】originを使わず、指定したURLへ直接Pushします
+git push {repo_url} main
+"""
+        },
+        "3": {
+            "title": "間違えてPushしたファイルを履歴から消す（直前のコミット）",
+            "text": f"""
+# 1. ローカルのファイルは残したまま、Gitの追跡から外す
+git rm --cached <ファイル名>  (例: git rm --cached db.sqlite3)
+
+# 2. .gitignore にファイル名が追記されていることを確認
+
+# 3. 直前のコミットを上書きする
+git commit --amend -m "Remove accidentally added DB file"
+
+# 4. 【安全】指定したリポジトリを強制上書き
+git push -f {repo_url} main
+"""
+        },
+        "4": {
+            "title": "間違えてPushしたファイルを履歴から消す（過去のコミット）",
+            "text": f"""
+# インストール (Python環境がある場合)
+pip install git-filter-repo
+
+# 特定のファイルを履歴の全てから完全に消し去る
+git filter-repo --path <ファイル名> --invert-paths
+
+# 【安全】指定したリポジトリへ強制Pushして反映
+git push -f {repo_url} main
+"""
+        },
+        "5": {
+            "title": ".gitignore のテンプレート",
+            "text": """
+# 以下の内容を .gitignore という名前のファイルに保存してください
+
+# Python
+__pycache__/
+*.pyc
+
+# SQLite
+*.db
+*.sqlite3
+
+# Node
+node_modules/
+.vite/
+
+# VSCode
+.vscode/
+
+# Build & Output
+dist/
+build/
+output/
+backend/data/
+backend/orchestrator/data/
+"""
+        },
+        "6": {
+            "title": "巨大ファイルの確認",
+            "text": """
+git ls-files
+git ls-files | findstr ".db"  (Windows)
+git ls-files | grep "\.db"    (Mac/Linux)
+"""
+        },
+        "7": {
+            "title": "Gitの履歴を完全に捨てて初期化する (最終手段)",
+            "text": f"""
+# Windowsの場合は .git フォルダを削除
+rmdir /s /q .git
+
+# 新しく作り直す
+git init
+git branch -M main
+git remote add origin {repo_url}
+git add .
+git commit -m "Initial clean commit"
+git push -u -f {repo_url} main
+"""
+        },
+        "0": {
+            "title": "終了",
+            "text": ""
+        }
+    }
+
+def print_menu(repo_url, manuals):
+    print("\n=========================================")
+    print(" Git Manual - 誤爆防止モード")
+    print("=========================================")
+    print(f" [ターゲット] {repo_url}")
+    print("=========================================")
+    for key, val in manuals.items():
+        print(f"[{key}] {val['title']}")
+    print("=========================================")
+
+def main():
+    print("=========================================")
+    print(" Git作業マニュアルを開始します")
+    print("=========================================")
+    
+    # 起動時にリポジトリURLを必須入力とする
+    repo_url = ""
+    while not repo_url:
+        repo_url = input("更新対象のGitHubリポジトリURLを入力してください\n(例: https://github.com/USER/REPO.git)\n> ").strip()
+        if not repo_url:
+            print("[!] URLが入力されていません。安全のため必ず入力してください。\n")
+
+    manuals = get_manuals(repo_url)
+
+    while True:
+        print_menu(repo_url, manuals)
+        choice = input("番号を入力 (0-7): ").strip()
+
+        if choice == "0":
+            print("終了します。")
+            sys.exit(0)
+        
+        elif choice in manuals:
+            print("\n-----------------------------------------")
+            print(f"▼ {manuals[choice]['title']}")
+            print("-----------------------------------------")
+            print(manuals[choice]['text'].strip('\n'))
+            print("-----------------------------------------\n")
+            input("Enterキーを押すとメニューに戻ります...")
+        
+        else:
+            print("\n[!] 正しい番号を入力してください。")
+
+if __name__ == "__main__":
+    main()
