@@ -1,219 +1,295 @@
 import os
 import json
 import re
-import traceback
-import base64
 import io
-from typing import Dict, Any, Tuple, Optional
+import base64
+import traceback
+from typing import Dict, Any, List, Optional, Union, Tuple
+import pandas as pd
 from PIL import Image
-from pyzbar.pyzbar import decode
 
-# 事前に作成した PaperAnalysisHandler をインポート
-from engine.handlers.paper_analysis_handler import PaperAnalysisHandler
+# OCR用ライブラリの読み込み（未アクセスの場合はエラーハンドリング）
+try:
+    import pytesseract
+    HAS_PYTESSERACT = True
+except ImportError:
+    HAS_PYTESSERACT = False
 
 
-class AnalysisOrchestrator:
+class GoogleSheetsAnalysisHandler:
     """
-    論文データの逐次読み込み、補完・スコアリング解析、
-    および JSON/JSONL での出力永続化と UI Block レンダリングを統括するオーケストレーター
+    Googleスプレッドシートデータ（JSON/辞書/CSV）および
+    画像データ（OCRによる表文字起こし）をパース・解析し、
+    集計サマリー・在庫アラート・UI Blockレスポンスを生成するハンドラー
     """
 
-    def __init__(self, project_root: str = "."):
-        self.project_root = project_root
-        self.handler = PaperAnalysisHandler()
-        
-        # 中間・最終成果物の保存用ディレクトリ
-        self.output_dir = os.path.join(self.project_root, "backend", ".ai_memory", "analysis_outputs")
-        os.makedirs(self.output_dir, exist_ok=True)
-
-    async def execute(self, request: Any) -> Tuple[str, Dict[str, Any]]:
+    def __init__(self, low_stock_threshold: int = 10, tesseract_cmd: Optional[str] = None):
         """
-        ChatService から呼び出されるメインエントリーポイント。
+        Args:
+            low_stock_threshold (int): 在庫不足アラートの閾値（デフォルト: 10）
+            tesseract_cmd (str): tesseract実行ファイルのパス指定（必要な場合）
+        """
+        self.low_stock_threshold = low_stock_threshold
+        if tesseract_cmd and HAS_PYTESSERACT:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    def analyze_sheets(self, sheets_input: Any = None, image_input: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        メインエントリーポイント。
 
         Args:
-            request: ChatRequest (Pydanticモデル) または辞書形式のリクエスト
-                     (message フィールドに加え、image や image_data フィールドに対応)
+            sheets_input: JSON, リスト, 辞書, CSV文字列など
+            image_input: 画像のBase64文字列、バイナリデータ、またはPIL Image
 
         Returns:
-            Tuple[str, Dict[str, Any]]: (response_type, content)
+            Dict[str, Any]: response_type と content (UI Blocks含む)
         """
         try:
-            # 1. リクエストメッセージおよび画像データの取り出し
-            message_str = getattr(request, "message", None)
-            image_data = getattr(request, "image", None) or getattr(request, "image_data", None)
+            df = None
+            sheet_name = "シートデータ"
 
-            if isinstance(request, dict):
-                if message_str is None:
-                    message_str = request.get("message", "")
-                if image_data is None:
-                    image_data = request.get("image") or request.get("image_data")
+            # 1. 画像入力がある場合は OCR を実行してデータフレーム化
+            if image_input or (isinstance(sheets_input, dict) and "image" in sheets_input):
+                img_data = image_input or sheets_input.get("image")
+                df, sheet_name = self._ocr_image_to_dataframe(img_data)
+                
+            # 2. テキスト・JSONデータからのパース
+            if df is None and sheets_input is not None:
+                df, sheet_name = self._parse_to_dataframe(sheets_input)
 
-            # 2. 画像が送信されている場合は QR コードの解析を実行
-            scanned_qr_data = None
-            if image_data:
-                scanned_qr_data = self._extract_qr_from_image(image_data)
-                if scanned_qr_data:
-                    print(f"🔍 [AnalysisOrchestrator] 画像からQRコードを検出: {scanned_qr_data}")
-                    # テキストメッセージ側にQRコードの解析結果を結合
-                    message_str = f"{message_str}\n{scanned_qr_data}".strip()
+            # データが読み込めなかった場合のガード
+            if df is None or df.empty:
+                return self._build_error_response("解析可能な表データまたは画像を検出できませんでした。")
 
-            # 3. メッセージ文字列から JSON データの自動抽出
-            papers_data = self._extract_json_from_text(message_str)
+            # 3. 基本データ統計の算出
+            summary = self._generate_data_summary(df, sheet_name)
 
-            # JSONデータが存在せず、かつQRコードも読み取れなかった場合のガード表示
-            if not papers_data:
-                error_msg = "⚠️ **JSONデータまたは有効なQRコードが検出できませんでした**\n\nデータを含むJSONテキスト、またはQRコード画像を送信してください。"
-                if image_data and not scanned_qr_data:
-                    error_msg = "⚠️ **画像からQRコードを読み取れませんでした**\n\n画像が鮮明か、または直接JSONデータテキストを入力してください。"
+            # 4. 異常値・在庫アラート・注意点の抽出
+            alerts = self._detect_alerts_and_insights(df)
 
-                return "ui_code", {
-                    "message": "解析対象のデータが見つかりませんでした。",
-                    "blocks": [
-                        {
-                            "type": "MarkdownChatBlock",
-                            "props": {
-                                "content": error_msg
-                            }
-                        }
-                    ]
+            # 5. Chat UI 用の表示ブロック（Markdownやテーブル等）の構築
+            blocks = self._build_ui_blocks(summary, alerts, df)
+
+            return {
+                "response_type": "ui_code",
+                "content": {
+                    "message": f"📊 解析が完了しました（データソース: {sheet_name}）",
+                    "summary": summary,
+                    "alerts": alerts,
+                    "blocks": blocks
                 }
-
-            # 4. Handler を呼び出してスコアリングおよび UI ブロック用のデータを生成
-            handler_result = self.handler.analyze_papers(papers_data)
-
-            # 5. スコア結果・根拠の保存（JSON / JSONL への永続化）
-            self._save_analysis_results(handler_result)
-
-            # 6. response_type と content を取得して返却
-            response_type = handler_result.get("response_type", "ui_code")
-            content = handler_result.get("content", {})
-
-            return response_type, content
+            }
 
         except Exception as e:
             error_details = traceback.format_exc()
-            print(f"🚨 [AnalysisOrchestrator] エラー発生:\n{error_details}")
+            print(f"🚨 [GoogleSheetsAnalysisHandler] エラーが発生しました:\n{error_details}")
+            return self._build_error_response(f"データ解析中に例外が発生しました: {str(e)}")
 
-            return "ui_code", {
-                "message": "解析処理の実行中にエラーが発生しました。",
-                "blocks": [
-                    {
-                        "type": "MarkdownChatBlock",
-                        "props": {
-                            "content": f"❌ **処理エラーの詳細:**\n```\n{str(e)}\n```"
-                        }
-                    }
-                ]
-            }
+    def _ocr_image_to_dataframe(self, image_input: Any) -> Tuple[Optional[pd.DataFrame], str]:
+        """画像データに対してOCRを実行し、表構造のテキストを生成してDataFrameに変換する"""
+        if not HAS_PYTESSERACT:
+            print("⚠️ pytesseract が利用できません。`pip install pytesseract pillow` を確認してください。")
+            return None, "OCRエラー"
 
-    def _extract_qr_from_image(self, image_input: Any) -> Optional[str]:
-        """
-        Base64文字列またはバイナリの画像データから pyzbar を使ってQRコードを抽出しテキスト化する
-        """
         try:
-            image_bytes = None
-
+            # 1. 入力画像を PIL Image オブジェクトに変換
+            image = None
             if isinstance(image_input, str):
-                # Data URI 形式 ("data:image/png;base64,...") のヘッダー除去
+                # Base64 文字列のプレフィックス除去
                 if "," in image_input:
                     image_input = image_input.split(",", 1)[1]
                 image_bytes = base64.b64decode(image_input)
+                image = Image.open(io.BytesIO(image_bytes))
             elif isinstance(image_input, bytes):
-                image_bytes = image_input
+                image = Image.open(io.BytesIO(image_input))
+            elif isinstance(image_input, Image.Image):
+                image = image_input
 
-            if not image_bytes:
-                return None
+            if image is None:
+                return None, "画像読み込み失敗"
 
-            image = Image.open(io.BytesIO(image_bytes))
-            decoded_objects = decode(image)
-
-            if decoded_objects:
-                # 最初に読み取れたQRコードの内容を返す
-                return decoded_objects[0].data.decode("utf-8")
-
-        except Exception as e:
-            print(f"⚠️ [AnalysisOrchestrator] QR画像解析に失敗しました: {e}")
-
-        return None
-
-    def _extract_json_from_text(self, text: str) -> Dict[str, Any]:
-        """
-        テキストに含まれる ```json ... ``` や生のJSON文字列を安全に切り出してパースする
-        """
-        if not text:
-            return {}
-
-        # パターン1: コードブロック (```json ... ```) からの抽出し試行
-        json_code_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-        if json_code_match:
-            try:
-                return json.loads(json_code_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # パターン2: テキスト内の最も外側の中括弧 { ... } を探索
-        curly_match = re.search(r"(\{[\s\S]*\})", text)
-        if curly_match:
-            try:
-                return json.loads(curly_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # パターン3: 全体を直接パース試行
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-
-    def _save_analysis_results(self, handler_result: Dict[str, Any]) -> None:
-        """
-        解析されたスコアと根拠データを JSON ファイルおよび JSONL 形式の履歴として追記保存する
-        """
-        try:
-            content = handler_result.get("content", {})
+            # 2. Tesseract OCR の実行（日本語＋英語）
+            ocr_text = pytesseract.image_to_string(image, lang='jpn+eng')
             
-            # 最新の集計結果ファイル (.json)
-            latest_json_path = os.path.join(self.output_dir, "latest_analysis_score.json")
-            with open(latest_json_path, "w", encoding="utf-8") as f:
-                json.dump(content, f, ensure_ascii=False, indent=2)
+            if not ocr_text.strip():
+                return None, "OCR空表示"
 
-            # スコア履歴・エビデンス追記用ログ (.jsonl)
-            history_jsonl_path = os.path.join(self.output_dir, "analysis_history.jsonl")
-            with open(history_jsonl_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(content, ensure_ascii=False) + "\n")
+            # 3. テキストを行ごとに分解し、表形式として構造化パース
+            lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
+            parsed_rows = []
+            
+            for line in lines:
+                # タブ、2文字以上のスペース、カンマ、パイプ(|)でカラムを分割
+                row = re.split(r'\t|\s{2,}|,|\|', line)
+                row = [cell.strip() for cell in row if cell.strip()]
+                if row:
+                    parsed_rows.append(row)
 
-            print(f"💾 [AnalysisOrchestrator] 解析データを保存完了: {latest_json_path}")
+            if not parsed_rows:
+                return None, "OCR表パース失敗"
+
+            # 1行目をヘッダー（カラム名）、2行目以降をデータとして DataFrame 化
+            headers = parsed_rows[0]
+            data_rows = parsed_rows[1:]
+
+            # カラム数の一致を補正
+            valid_rows = []
+            for r in data_rows:
+                if len(r) == len(headers):
+                    valid_rows.append(r)
+                elif len(r) < len(headers):
+                    # 足りない列を空文字で埋める
+                    valid_rows.append(r + [""] * (len(headers) - len(r)))
+                else:
+                    # 多すぎる列を切り捨てる
+                    valid_rows.append(r[:len(headers)])
+
+            df = pd.DataFrame(valid_rows, columns=headers)
+
+            # 数値型カラムの自動変換試行
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='ignore')
+
+            return df, "OCR解析画像"
+
         except Exception as e:
-            print(f"⚠️ [AnalysisOrchestrator] 保存処理失敗: {e}")
+            print(f"⚠️ [OCR解析エラー]: {e}")
+            return None, "OCR処理例外"
 
+    def _parse_to_dataframe(self, sheets_input: Any) -> Tuple[Optional[pd.DataFrame], str]:
+        """JSON/辞書/リスト/CSV形式の入力データを DataFrame に変換"""
+        sheet_name = "スプレッドシート"
 
-# スタンドアロン動作テスト
-if __name__ == "__main__":
-    import asyncio
+        if isinstance(sheets_input, dict):
+            sheet_name = sheets_input.get("sheet_name", sheet_name)
+            data = sheets_input.get("data", sheets_input.get("rows", sheets_input))
+            if isinstance(data, list):
+                return pd.DataFrame(data), sheet_name
+            elif isinstance(data, dict):
+                return pd.DataFrame.from_dict(data, orient="index"), sheet_name
 
-    class DummyRequest:
-        def __init__(self, message: str = "", image: Optional[str] = None):
-            self.message = message
-            self.image = image
+        elif isinstance(sheets_input, list):
+            return pd.DataFrame(sheets_input), sheet_name
 
-    sample_message = """
-    以下のデータを解析してください。
-    ```json
-    {
-      "W4392162657": {
-        "title": "Assessing urban livability in Shanghai...",
-        "summary_ja": "住宅クラスター（RBC）を中心としたバッファ分析...",
-        "key_method": "POIデータの密度と多様性を算出",
-        "tags": ["POI", "バッファ分析"]
-      }
-    }
-    ```
-    """
+        elif isinstance(sheets_input, str):
+            try:
+                parsed_json = json.loads(sheets_input)
+                return self._parse_to_dataframe(parsed_json)
+            except json.JSONDecodeError:
+                pass
 
-    async def main():
-        orchestrator = AnalysisOrchestrator(project_root=".")
-        res_type, content = await orchestrator.execute(DummyRequest(message=sample_message))
-        print("Response Type:", res_type)
-        print("Response Content:", json.dumps(content, ensure_ascii=False, indent=2))
+        return None, sheet_name
 
-    asyncio.run(main())
+    def _generate_data_summary(self, df: pd.DataFrame, sheet_name: str) -> Dict[str, Any]:
+        """データ全体のサマリー情報を生成"""
+        total_rows = len(df)
+        total_cols = len(df.columns)
+        col_names = list(df.columns)
+
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        numeric_summary = {}
+
+        for col in numeric_cols:
+            numeric_summary[col] = {
+                "total": float(df[col].sum()),
+                "mean": round(float(df[col].mean()), 2),
+                "min": float(df[col].min()),
+                "max": float(df[col].max())
+            }
+
+        return {
+            "sheet_name": sheet_name,
+            "total_records": total_rows,
+            "total_columns": total_cols,
+            "columns": col_names,
+            "numeric_summary": numeric_summary,
+            "missing_count": int(df.isnull().sum().sum())
+        }
+
+    def _detect_alerts_and_insights(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """在庫不足や欠損値などのアラートを検出"""
+        alerts = []
+        stock_cols = [c for c in df.columns if any(k in str(c).lower() for k in ["在庫", "stock", "数量", "count"])]
+        
+        for col in stock_cols:
+            # 数値型に変換可能な場合の判定
+            numeric_series = pd.to_numeric(df[col], errors='coerce')
+            if not numeric_series.isnull().all():
+                low_stock_mask = numeric_series <= self.low_stock_threshold
+                low_stock_items = df[low_stock_mask]
+                
+                if not low_stock_items.empty:
+                    item_names = []
+                    name_cols = [c for c in df.columns if any(k in str(c).lower() for k in ["名", "品", "item", "title", "code", "コード"])]
+                    name_col = name_cols[0] if name_cols else df.columns[0]
+
+                    for idx, row in low_stock_items.iterrows():
+                        val = numeric_series[idx]
+                        item_names.append(f"{row[name_col]} (残り: {val})")
+
+                    alerts.append({
+                        "level": "warning",
+                        "title": f"⚠️ 在庫不足アラート ({col})",
+                        "description": f"発注点（{self.low_stock_threshold}個以下）を下回っている項目:",
+                        "items": item_names[:10]
+                    })
+
+        return alerts
+
+    def _build_ui_blocks(self, summary: Dict[str, Any], alerts: List[Dict[str, Any]], df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """UI表示用ブロックの生成"""
+        blocks = []
+
+        summary_md = f"### 📊 データ概要 [{summary['sheet_name']}]\n"
+        summary_md += f"- **行数**: `{summary['total_records']} 行` | **列数**: `{summary['total_columns']} 列`\n"
+        summary_md += f"- **項目名**: {', '.join([f'`{c}`' for c in summary['columns']])}\n"
+
+        if summary["numeric_summary"]:
+            summary_md += "\n#### 📈 自動集計（数値項目）\n"
+            for col, stats in summary["numeric_summary"].items():
+                summary_md += f"- **{col}**: 合計 `{stats['total']}` / 平均 `{stats['mean']}` (最小 `{stats['min']}` 〜 最大 `{stats['max']}`)\n"
+
+        blocks.append({
+            "type": "MarkdownChatBlock",
+            "props": {"content": summary_md}
+        })
+
+        if alerts:
+            alert_md = "### 🚨 検出された警告・通知\n"
+            for alert in alerts:
+                alert_md += f"#### {alert['title']}\n{alert['description']}\n"
+                if alert.get("items"):
+                    for item in alert["items"]:
+                        alert_md += f"- {item}\n"
+                alert_md += "\n"
+
+            blocks.append({
+                "type": "MarkdownChatBlock",
+                "props": {"content": alert_md}
+            })
+
+        preview_data = df.head(5).to_dict(orient="records")
+        blocks.append({
+            "type": "TableChatBlock",
+            "props": {
+                "title": "📋 解析データプレビュー（先頭5行）",
+                "columns": summary["columns"],
+                "rows": preview_data
+            }
+        })
+
+        return blocks
+
+    def _build_error_response(self, error_message: str) -> Dict[str, Any]:
+        return {
+            "response_type": "ui_code",
+            "content": {
+                "message": "データ解析に失敗しました。",
+                "blocks": [
+                    {
+                        "type": "MarkdownChatBlock",
+                        "props": {"content": f"❌ **エラー:** {error_message}"}
+                    }
+                ]
+            }
+        }
